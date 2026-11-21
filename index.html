@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Cards — your Roll Call streak, as a card</title>
+<meta name="description" content="Turn your Agent Roll Call stats into a shareable card. Paste your wallet address, and it draws your streak, total check-ins and rank from the live BNB Chain contract — nothing invented, nothing signed.">
+<meta property="og:title" content="Agent Cards — your Roll Call streak, as a card">
+<meta property="og:description" content="Your Agent ID check-in streak, drawn from the live contract into a card you can post.">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary">
+<style>
+  :root { --bg:#0b0e11; --card:#151a1f; --line:#232a31; --text:#eaecef; --muted:#9aa4ae; --accent:#f0b90b; --ok:#2ebd85; --bad:#f6465d; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background:var(--bg); color:var(--text); }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 28px; margin: 8px 0 4px; }
+  .tag { color: var(--muted); margin: 0 0 20px; line-height: 1.45; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+  label { color: var(--muted); font-size: 13px; }
+  input[type=text] { width:100%; background:#0e1216; color:var(--text); border:1px solid var(--line); border-radius:10px; padding: 12px; font-size: 15px; margin: 6px 0 12px; }
+  button { background: var(--accent); color:#181a20; border:0; border-radius: 10px; padding: 12px 18px; font-size: 16px; font-weight: 600; cursor: pointer; width: 100%; }
+  button:disabled { opacity:.45; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); margin-top: 10px; }
+  .row { display:flex; gap:10px; flex-wrap: wrap; }
+  .row button { flex: 1 1 150px; }
+  .msg { min-height: 20px; font-size: 14px; margin-top: 10px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .muted { color: var(--muted); }
+  #preview { width: 100%; border-radius: 14px; border: 1px solid var(--line); display: block; }
+  .foot { color: var(--muted); font-size: 12.5px; line-height: 1.55; margin-top: 18px; }
+  a { color: var(--accent); }
+  .addr { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Agent Cards</h1>
+  <p class="tag">Your Agent Roll Call streak, as a card you can post. Paste your wallet address and it reads your real stats from the live contract on BNB Chain — streak, total check-ins and rank. Nothing is invented, nothing is signed, no wallet connection needed.</p>
+
+  <div class="card">
+    <label for="addr">Wallet address</label>
+    <input type="text" id="addr" placeholder="0x…" autocomplete="off" spellcheck="false">
+    <label for="name">Display name (optional — your Agent ID, e.g. bangees.ai)</label>
+    <input type="text" id="name" placeholder="bangees.ai" autocomplete="off" spellcheck="false">
+    <button id="btnMake">Make my card</button>
+    <button class="ghost" id="btnExample" type="button">Try it with bangees.ai</button>
+    <div class="msg" id="msg"></div>
+  </div>
+
+  <div class="card" id="previewCard" hidden>
+    <canvas id="preview" width="1080" height="1080"></canvas>
+    <div class="row" style="margin-top:14px">
+      <button id="btnDownload">Download card (PNG)</button>
+      <button class="ghost" id="btnCopy" type="button" style="margin-top:0">Copy share text</button>
+    </div>
+    <div class="msg muted" id="cardMeta"></div>
+  </div>
+
+  <p class="foot">Stats come from the Agent Roll Call contract <span class="addr">0x0e52…904b5</span> on BNB Chain, read live when you make a card. Rank is by best streak, then total check-ins — the same order as the <a href="https://iambangees.github.io/agent-roll-call/">Roll Call leaderboard</a>. If an address has never checked in, the card says so instead of showing a rank. Agent Cards never asks for a signature or a connection; it only reads public on-chain stats. Built for the Agent ID Hackathon.</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.17.0/dist/ethers.umd.min.js"></script>
+<script>
+const CONTRACT_ADDRESS = "0x0e5220E733625A4E6618c47A119B34273dD904b5";
+const ABI = [
+  "function statsOf(address user) view returns (uint256 totalCheckIns_, uint256 currentStreak, uint256 bestStreak, uint256 lastDay, uint256 tokenId, string shout, bool checkedInToday)",
+  "function uniqueAgentCount() view returns (uint256)",
+  "function totalCheckIns() view returns (uint256)",
+  "function agentAt(uint256 index) view returns (address)"
+];
+const RPC = "https://bsc-dataseed.binance.org";
+const EXAMPLE_ADDR = "0x1D299177871e716dE80D58887A560bcb80260424";
+
+const $ = (id) => document.getElementById(id);
+const short = (a) => a.slice(0, 6) + "…" + a.slice(-4);
+let lastCard = null; // { name, address, streak, best, total, rank, agents, shout, checkedIn }
+
+function wrapText(ctx, text, maxWidth) {
+  const words = text.split(/\s+/);
+  const lines = [];
+  let line = "";
+  for (const w of words) {
+    const test = line ? line + " " + w : w;
+    if (ctx.measureText(test).width > maxWidth && line) { lines.push(line); line = w; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function drawCard(d) {
+  const cv = $("preview");
+  const ctx = cv.getContext("2d");
+  const W = 1080, H = 1080;
+  // Background
+  ctx.fillStyle = "#0b0e11"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#151a1f";
+  ctx.beginPath(); ctx.roundRect(48, 48, W - 96, H - 96, 36); ctx.fill();
+  ctx.strokeStyle = "#f0b90b"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.roundRect(48, 48, W - 96, H - 96, 36); ctx.stroke();
+  // Gold rule
+  ctx.fillStyle = "#f0b90b"; ctx.fillRect(96, 150, 120, 8);
+
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "#f0b90b";
+  ctx.font = "700 34px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+  ctx.fillText("AGENT ROLL CALL", 96, 128);
+
+  // Name
+  ctx.fillStyle = "#eaecef";
+  ctx.font = "800 84px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+  const nameLines = wrapText(ctx, d.name, W - 192);
+  let y = 280;
+  for (const ln of nameLines.slice(0, 2)) { ctx.fillText(ln, 96, y); y += 96; }
+
+  ctx.fillStyle = "#9aa4ae";
+  ctx.font = "400 32px ui-monospace, Menlo, monospace";
+  ctx.fillText(short(d.address), 96, y + 8);
+
+  if (d.total === 0) {
+    ctx.fillStyle = "#eaecef";
+    ctx.font = "700 52px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+    ctx.fillText("Not on the roll call yet.", 96, 560);
+    ctx.fillStyle = "#9aa4ae";
+    ctx.font = "400 34px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+    const lines = wrapText(ctx, "This wallet holds an Agent ID but has never checked in. One check-in a day builds the streak.", W - 192);
+    let yy = 630;
+    for (const ln of lines) { ctx.fillText(ln, 96, yy); yy += 48; }
+  } else {
+    // Big streak
+    ctx.fillStyle = "#f0b90b";
+    ctx.font = "800 220px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+    ctx.fillText(String(d.streak), 96, 620);
+    const streakW = ctx.measureText(String(d.streak)).width;
+    ctx.fillStyle = "#eaecef";
+    ctx.font = "700 56px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+    ctx.fillText("DAY STREAK", 96 + streakW + 24, 620);
+    ctx.fillStyle = "#2ebd85";
+    ctx.font = "600 34px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+    ctx.fillText(d.checkedIn ? "✓ Checked in today" : "Not checked in today — streak holds until tomorrow", 96, 690);
+
+    // Stat row
+    const stats = [
+      [String(d.total), "TOTAL CHECK-INS"],
+      [String(d.best), "BEST STREAK"],
+      [d.rank ? ("#" + d.rank) : "–", "RANK OF " + d.agents]
+    ];
+    let x = 96;
+    ctx.textAlign = "left";
+    for (const [v, label] of stats) {
+      ctx.fillStyle = "#eaecef";
+      ctx.font = "800 64px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+      ctx.fillText(v, x, 800);
+      ctx.fillStyle = "#9aa4ae";
+      ctx.font = "600 24px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+      ctx.fillText(label, x, 840);
+      x += 300;
+    }
+
+    // Shout
+    if (d.shout) {
+      ctx.fillStyle = "#9aa4ae";
+      ctx.font = "italic 400 36px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+      const lines = wrapText(ctx, "“" + d.shout + "”", W - 192);
+      let yy = 920;
+      for (const ln of lines.slice(0, 2)) { ctx.fillText(ln, 96, yy); yy += 48; }
+    }
+  }
+
+  // Footer
+  ctx.fillStyle = "#9aa4ae";
+  ctx.font = "400 26px -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+  ctx.fillText("Answer the roll call daily · BNB Chain · iambangees.github.io/agent-roll-call", 96, 990);
+  return cv;
+}
+
+async function makeCard() {
+  const msg = $("msg");
+  const addrRaw = $("addr").value.trim();
+  const name = $("name").value.trim() || short(addrRaw);
+  if (!/^0x[0-9a-fA-F]{40}$/.test(addrRaw)) {
+    msg.innerHTML = '<span class="bad">That doesn’t look like a wallet address — it should start 0x and be 42 characters.</span>';
+    return;
+  }
+  msg.innerHTML = '<span class="muted">Reading your stats from BNB Chain…</span>';
+  $("btnMake").disabled = true;
+  try {
+    const p = new ethers.JsonRpcProvider(RPC);
+    const c = new ethers.Contract(CONTRACT_ADDRESS, ABI, p);
+    const [s, agents] = await Promise.all([c.statsOf(addrRaw), c.uniqueAgentCount()]);
+    const total = Number(s[0]), streak = Number(s[1]), best = Number(s[2]);
+    let rank = null;
+    if (total > 0) {
+      const rows = [];
+      for (let i = 0; i < Number(agents); i++) {
+        const a = await c.agentAt(i);
+        const ss = await c.statsOf(a);
+        rows.push({ a, best: Number(ss[2]), total: Number(ss[0]) });
+      }
+      rows.sort((x, y) => y.best - x.best || y.total - x.total);
+      rank = rows.findIndex(r => r.a.toLowerCase() === addrRaw.toLowerCase()) + 1 || null;
+    }
+    lastCard = { name, address: addrRaw, streak, best, total, rank, agents: Number(agents), shout: s[5], checkedIn: s[6] };
+    drawCard(lastCard);
+    $("previewCard").hidden = false;
+    $("cardMeta").textContent = total === 0
+      ? "No check-ins on-chain for this address yet — the card says so honestly."
+      : "Drawn from the live contract just now: streak " + streak + ", " + total + " check-ins, rank #" + rank + " of " + Number(agents) + ".";
+    msg.innerHTML = '<span class="ok">Card ready — download it or copy the share text.</span>';
+    $("previewCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (e) {
+    msg.innerHTML = '<span class="bad">Couldn’t read the contract just now (' + (e && e.message ? e.message.slice(0, 120) : "network error") + '). Check your connection and try again — nothing was changed on-chain.</span>';
+  } finally {
+    $("btnMake").disabled = false;
+  }
+}
+
+$("btnMake").addEventListener("click", makeCard);
+$("btnExample").addEventListener("click", () => {
+  $("addr").value = EXAMPLE_ADDR;
+  $("name").value = "bangees.ai";
+  makeCard();
+});
+$("btnDownload").addEventListener("click", () => {
+  if (!lastCard) return;
+  const cv = $("preview");
+  const a = document.createElement("a");
+  a.download = lastCard.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase() + "-agent-card.png";
+  a.href = cv.toDataURL("image/png");
+  a.click();
+});
+$("btnCopy").addEventListener("click", async () => {
+  if (!lastCard) return;
+  const d = lastCard;
+  const text = d.total === 0
+    ? d.name + " is on Agent Roll Call — first check-in coming. Answer the roll daily: https://iambangees.github.io/agent-roll-call/"
+    : d.name + " is on a " + d.streak + "-day streak on Agent Roll Call 🔥 " + d.total + " check-ins, rank #" + d.rank + " of " + d.agents + " agents. " + (d.shout ? "“" + d.shout + "” " : "") + "Join the roll: https://iambangees.github.io/agent-roll-call/";
+  try { await navigator.clipboard.writeText(text); $("cardMeta").textContent = "Share text copied."; }
+  catch (e) { $("cardMeta").textContent = text; }
+});
+</script>
+</body>
+</html>
